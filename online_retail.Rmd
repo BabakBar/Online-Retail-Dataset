@@ -1,0 +1,304 @@
+---
+title: "Online retail - Babak Barghi, Will Rains"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+Today's task is about analyzing the online_retail dataset. It is available throught the BAdatasets package, that can be installed doing:
+
+```{r, eval = FALSE}
+devtools::install_github("jmsallan/BAdatasets")
+```
+
+Let's load the packages we might need:
+
+```{r}
+library(tidyverse)
+library(arules)
+library(BAdatasets)
+library(lubridate)
+library(kableExtra)
+```
+
+Let's examine the dataset:
+
+```{r}
+data("online_retail")
+online_retail %>% glimpse()
+```
+
+You can obtain more information about the dataset through the help file, that can be accessed doing `?online_retail`.
+
+*Examine the help of the dataset, and choose the variables that best describe items and transactions.*
+<p>
+<br>
+Best variables that describe items and transactions:
+</p>
+<ul>
+  <li>StockCode gives the unique identifier for the product purchased</li>
+  <li>Invoice Number relates to what specific order the record relates to. The dataset total record count is not the total number of orders. The number of orders will be lower as for example the first 6 records relate to the same order and tell us that 6 different products of varying quantities were ordered</li>
+  <li>Physical Description to put know what the physical object actually is</li>
+  <li>Quantity import to know the actual number of units purchased</li>
+  <li>unit price important to understand on a unit basis and order basis the amount of revenue brought in</li>
+</ul>
+```{r}
+
+?online_retail
+skimr::skim(online_retail)
+
+##
+
+```
+
+
+
+## Cancelled transactions
+
+*How many of the recorded transactions are cancellations?*
+
+Based on the data set description we know that if an Invoice number starts with "C" then it is a cancellation.
+
+```{r}
+
+cancellations <- online_retail %>%
+  filter(str_detect(InvoiceNo,"C"))
+  
+itemcancellations <- online_retail %>%
+  filter(str_detect(InvoiceNo,"C")) %>%
+  pull(InvoiceNo) %>%
+  length()
+
+#There were the below number of items cancelled
+print(itemcancellations)
+
+#Orders including full or partial cancellations
+ordercancellations <- online_retail %>%
+  filter(str_detect(InvoiceNo,"C")) %>%
+  pull(InvoiceNo) %>%
+  unique() %>%
+  length()
+
+
+#There were the following number of orders that included full or partial cancellations
+print(ordercancellations)
+
+
+```
+
+
+*Which is the customer with more cancellations?*
+```{r}
+
+mostordercancellations <- online_retail %>%
+  filter(str_detect(InvoiceNo,"C")) %>%
+  unique() %>%
+  group_by(CustomerID) %>%
+  summarise(Canc_Cust_Ords=n()) %>%
+  arrange(desc(Canc_Cust_Ords))
+
+
+
+```
+
+
+The following customer had the most cancellations after NA (also shown are the number of cancellations):
+```{r}
+mostordercancellations[2,]
+```
+
+
+*For the following questions, remove the cancelled transactions from the dataset.*
+
+```{r}
+
+#also removing the orders starting with A as it seems those are also exception orders
+
+dataset_no_cancels <- online_retail %>%
+  filter(!str_detect(InvoiceNo,"C")) %>%
+  filter(!str_detect(InvoiceNo,"A")) %>%
+  filter(!is.na(CustomerID))
+
+
+```
+
+
+## Customer analysis
+
+*For each `CustomerID` find metrics of:*
+
+* *recency - last date of the dataset compared to last date of purchase for a customer*
+* *frequency - number of orders by customer*
+* *monetary value - calculate by invoice first and then by customer*
+
+*Find the customers with highest frequency and monetary value.*
+
+
+
+
+
+```{r}
+#last date of dataset
+lastrecord <- dataset_no_cancels %>%
+  arrange(desc(InvoiceDate)) %>%
+  slice(1)
+  
+#printed last date for use in recency calc
+lastdate <- pull(lastrecord[1,5])
+
+```
+
+
+```{r message=FALSE}
+#Calculate Order Count by CustomerID
+orderCount <- dataset_no_cancels %>%
+  group_by(CustomerID,InvoiceNo) %>%
+  summarize(CountofTrans=n()) %>%
+  group_by(CustomerID) %>%
+  summarise(FrequencyOrderCount=n()) %>%
+  arrange(desc(FrequencyOrderCount))
+  
+orderCount %>%
+  head(n = 10) %>%
+  kbl() %>%
+  kable_classic(full_width=F)
+```
+
+```{r message=FALSE}
+#Calculate Total Spend by Customer
+MoneyTotals <- dataset_no_cancels %>%
+  group_by(InvoiceNo,CustomerID) %>%
+  summarise(DollTotalbyInv=UnitPrice*Quantity) %>%
+  group_by(CustomerID) %>%
+  summarise(MonetaryValue=sum(DollTotalbyInv))
+
+#here we will calculate days since last order compared to most recent day in dataset and merge the tables together to get the full RFM dataset
+rfmCalcs <- dataset_no_cancels %>%
+  group_by(CustomerID) %>%
+  summarize(MostRecentDate=max(InvoiceDate),RecencyInDays=(lastdate-MostRecentDate)/3600/24) %>%
+  left_join(orderCount,by="CustomerID") %>%
+  left_join(MoneyTotals,by="CustomerID") 
+
+rfmCalcs$RecencyInDays <- as.numeric(rfmCalcs$RecencyInDays)
+```
+
+
+
+## Association rules
+
+*Find association rules from the dataset. You can start filtering rules with support higher than 1% and confidence higher than 80%.*
+
+*What kind of items are included in the association rules of highest lift?*
+
+*What marketing decisions would you take from your analysis?*
+
+Customers who bought Product X & Y also bought Product Z
+
+In order to start with association rules, we need to transform dataset into transactions, so all the items bought for each invoice together be in one row.
+
+
+```{r}
+#convert chr to factor
+rules_retail <- dataset_no_cancels %>%
+    mutate_if(is.character, as.factor) 
+
+```
+
+Here we combine the Descriptions for each InvoiceNo using *aggregate* function.
+
+```{r}
+items_invoice <-
+          aggregate(Description ~ InvoiceNo, data = rules_retail, FUN = paste, collapse = ",")
+
+str(items_invoice)
+```
+
+
+
+As we see the result combined all products from one InvoiceNo with each item separated.
+From this point we will separate the **Items** and apply the Basket Analysis.
+
+
+Now that pre processing the data set is ready. In this part we store it and then import it as transaction class using the **arules** package.
+
+```{r}
+#export dataset
+items_invoiceexport <- items_invoice %>% select(-InvoiceNo)
+
+write.csv(items_invoiceexport,file = "Items.csv", quote = FALSE, row.names = FALSE)
+
+
+# items_invoice %>% select(-InvoiceNo) %>%
+#   write.csv("Items.csv", quote = FALSE, row.names = FALSE)
+
+
+```
+
+
+```{r warning=FALSE, message=FALSE}
+#import as transaction
+trans_retail <- read.transactions("Items.csv",  format = 'basket', sep = ',', 
+    header = T)
+
+LIST(head(trans_retail, 4))
+```
+
+Now we take a look at the imported transactions file
+```{r}
+trans_retail
+summary(trans_retail)
+```
+
+From the above information we understand that there are 18536 transactions and 7803 items. 
+
+
+
+Create Rules
+
+Let’s create association rules. We limit the created rule only limited to support minimal 0.01 and confidence minimal 0.8.
+
+
+?apriori
+```{r}
+rules_all <- apriori(trans_retail,
+                     control = list(verbose=FALSE))
+rules_all <- sort(rules_all, by = "lift")
+
+inspect(rules_all)
+```
+
+
+*Find association rules from the dataset. You can start filtering rules with support higher than 1% and confidence higher than 80%.*
+
+```{r}
+#Min Support as 0.01 & confidence as 0.8
+rules_retail <- apriori(trans_retail, 
+                 parameter = list(supp = 0.01, conf = 0.8))
+
+#check top 10 rules
+inspect(rules_retail[1:10])
+```
+
+Considering the result we can assume that rules with confidence 1 means that, for instance, 100 percent of customers who bought "SUGAR" also bought "SET 3 RETROSPOT TEA".
+
+
+*What kind of items are included in the association rules of highest lift?*
+
+```{r}
+
+rules_retail <- sort(rules_retail, by="lift")
+inspect(rules_retail[1:12])
+```
+
+
+
+
+*What marketing decisions would you take from your analysis?*
+
+The company can escalate their sales using these information. In this case, marketing team can offer basket of items with discounts to encourage people for more buying. For instance, the company can offer people who bought **SUGAR** & **COFFEE** a discount to buy a **SET 3 RETROSPOT TEA**.
+
+When displaying these items on the online store make sure to show these other products as well near the top of the screen when the user is seeing the product. Also in the "frequently bought with" section. 
+
+
